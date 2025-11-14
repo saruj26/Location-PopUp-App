@@ -19,7 +19,7 @@ function CenterTabButton({ onPress }: any) {
       onPress={onPress}
     >
       <View style={styles.centerButton}>
-        <Ionicons name="add" size={28} color="#fff" />
+        <Ionicons name="person-add" size={22} color="#fff" />
       </View>
     </TouchableOpacity>
   );
@@ -38,6 +38,7 @@ function HeaderMenuButton() {
   );
 }
 
+
 export default function TabLayout() {
   return (
     <Tabs
@@ -48,7 +49,7 @@ export default function TabLayout() {
         headerStyle: { backgroundColor: "#007AFF" },
         headerTintColor: "#fff",
         tabBarStyle: {
-          height: 90,
+          height: 56,
           paddingBottom: 8,
           paddingTop: 6,
         },
@@ -82,26 +83,34 @@ export default function TabLayout() {
 
       <Tabs.Screen
         name="add-customer"
-        options={({ navigation }) => ({
+        options={{
           title: "Add",
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="add" size={28} color="#fff" />
+            <Ionicons name="person-add" size={size} color={color} />
           ),
-          tabBarButton: (props: any) => (
-            <CenterTabButton onPress={props.onPress} />
+        }}
+      />
+
+      <Tabs.Screen
+        name="history"
+        options={{
+          title: "History",
+          headerShown: false,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="time" size={size} color={color} />
           ),
-        })}
+        }}
       />
 
       <Tabs.Screen
         name="menu"
         options={{
           title: "Menu",
-          headerStyle: { backgroundColor: "#007AFF" },
+
           headerTintColor: "#fff",
           tabBarIcon: ({ color, size }) => (
             // Force menu icon to blue
-            <Ionicons name="menu" size={size} color={"#007AFF"} />
+            <Ionicons name="menu" size={size} color={color} />
           ),
         }}
       />

@@ -9,6 +9,7 @@ import {
   Alert,
   ScrollView,
 } from "react-native";
+import { useRouter } from "expo-router";
 
 export default function MenuScreen() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
@@ -29,9 +30,10 @@ export default function MenuScreen() {
   };
 
   const handleViewHistory = () => {
-    // In a real app, navigate to PastHistory screen
-    Alert.alert("History", "Open past delivery history (mock)");
+    router.push("/history");
   };
+
+  const router = useRouter();
 
   return (
     <ScrollView contentContainerStyle={styles.container}>

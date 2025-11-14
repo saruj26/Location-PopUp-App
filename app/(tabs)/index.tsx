@@ -12,78 +12,97 @@ import {
   TouchableOpacity,
   Linking,
   Platform,
+  RefreshControl,
+  Modal,
+  Dimensions,
 } from "react-native";
+import { useRouter } from "expo-router";
+import * as WebBrowser from "expo-web-browser";
+import { consumeFlash } from "../../services/flash";
 import * as Location from "expo-location";
 import LocationPopupProvider from "../../components/LocationPopupProvider";
 import { Ionicons } from "@expo/vector-icons";
+import { getCustomers, updateCustomerStatus } from "../../services/api";
+
+const { width: screenWidth, height: screenHeight } = Dimensions.get("window");
 
 type Customer = {
-  id: number;
+  _id: string;
   name: string;
-  latitude: number;
-  longitude: number;
   address: string;
+  latitude: number | null;
+  longitude: number | null;
+  orderDetails?: string;
+  deliveryPerson?: string;
+  status: string;
+  deliveryDate: string;
+  createdAt: string;
+  updatedAt: string;
 };
+
 export default function HomeScreen() {
+  const router = useRouter();
+  const [successVisible, setSuccessVisible] = useState(false);
+  const [successText, setSuccessText] = useState("");
+
+  // State for backend data
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // State for in-app maps
+  const [mapsVisible, setMapsVisible] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(
+    null
+  );
+  const [mapsUrl, setMapsUrl] = useState("");
+
+  useEffect(() => {
+    const msg = consumeFlash();
+    if (msg) {
+      setSuccessText(msg);
+      setSuccessVisible(true);
+    }
+    loadCustomers();
+  }, []);
+
   const [currentLocation, setCurrentLocation] = useState<{
     latitude: number;
     longitude: number;
   } | null>(null);
   const [currentAddress, setCurrentAddress] = useState<string | null>(null);
   const [locationPermission, setLocationPermission] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [locationLoading, setLocationLoading] = useState(true);
 
-  const customerLocations: Customer[] = [
-    {
-      id: 1,
-      name: "Gymnasium - Uva Wellassa University",
-      latitude: 6.981733040150603,
-      longitude: 81.07852941068032,
-      address: "Peradeniya-Badulla-Chenkaladi Hwy, Badulla",
-    },
-    {
-      id: 2,
-      name: "Kadala Boys Boarding",
-      latitude: 6.981045576537692,
-      longitude: 81.08306007112968,
-      address: "30 Peradeniya-Badulla-Chenkaladi Hwy, Badulla",
-    },
-    {
-      id: 3,
-      name: "Pizza Hut",
-      latitude: 6.9919596461505815,
-      longitude: 81.05429115791192,
-      address: "Keppetipola Road, Badulla",
-    },
-    {
-      id: 4,
-      name: "KFC",
-      latitude: 6.990380957801956,
-      longitude: 81.05146504616746,
-      address: "45 Bandarawela Rd, Badulla",
-    },
-    {
-      id: 5,
-      name: "E Lecture Hall",
-      latitude: 6.982081376655212,
-      longitude: 81.07600720993864,
-      address: "Peradeniya-Badulla-Chenkaladi Hwy, Badulla",
-    },
-    {
-      id: 6,
-      name: "RIVER VIEW RESTAURANT",
-      latitude: 6.987899714566949,
-      longitude: 81.05586386896313,
-      address: "10 Clinic Road, Badulla",
-    },
-    {
-      id: 7,
-      name: "Main Canteen UWU",
-      latitude: 6.980819436077193,
-      longitude: 81.07744219174182,
-      address: "Peradeniya-Badulla-Chenkaladi Hwy, Badulla",
-    },
-  ];
+  // Load customers from backend
+  const loadCustomers = async () => {
+    try {
+      setError(null);
+      console.log("Loading customers from backend...");
+
+      const response = await getCustomers();
+      console.log("Backend response:", response);
+
+      if (response.success && Array.isArray(response.customers)) {
+        setCustomers(response.customers);
+      } else {
+        throw new Error("Invalid response format from server");
+      }
+    } catch (error: any) {
+      console.error("Error loading customers:", error);
+      setError(error.message || "Failed to load customers");
+      Alert.alert("Error", "Failed to load customers from server");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadCustomers();
+  };
 
   const calculateDistance = (
     lat1: number,
@@ -110,7 +129,7 @@ export default function HomeScreen() {
 
   const startLocationTracking = async () => {
     try {
-      setLoading(true);
+      setLocationLoading(true);
 
       let { status } = await Location.requestForegroundPermissionsAsync();
 
@@ -120,7 +139,7 @@ export default function HomeScreen() {
           "Location permission is required for this app to work properly."
         );
         setLocationPermission(false);
-        setLoading(false);
+        setLocationLoading(false);
         return;
       }
 
@@ -157,10 +176,10 @@ export default function HomeScreen() {
         console.warn("Reverse geocode failed", err);
         setCurrentAddress(null);
       }
-      setLoading(false);
+      setLocationLoading(false);
     } catch (error) {
       console.error("Location error:", error);
-      setLoading(false);
+      setLocationLoading(false);
     }
   };
 
@@ -175,11 +194,7 @@ export default function HomeScreen() {
     return `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`;
   };
 
-  const openDirections = async (
-    destLat: number,
-    destLng: number,
-    label?: string
-  ) => {
+  const openDirectionsInApp = async (customer: Customer) => {
     if (!currentLocation) {
       Alert.alert(
         "Location required",
@@ -188,41 +203,103 @@ export default function HomeScreen() {
       return;
     }
 
-    const origin = `${currentLocation.latitude},${currentLocation.longitude}`;
-    const destination = `${destLat},${destLng}`;
+    // Validate coordinates
+    if (!customer.latitude || !customer.longitude) {
+      Alert.alert(
+        "Invalid Location",
+        "This customer doesn't have valid location coordinates."
+      );
+      return;
+    }
 
-    // Use Google Maps directions URL which works on both Android/iOS (will open in browser or Maps app)
+    const origin = `${currentLocation.latitude},${currentLocation.longitude}`;
+    const destination = `${customer.latitude},${customer.longitude}`;
+
+    // Create Google Maps URL for in-app browser
     const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(
       origin
-    )}&destination=${encodeURIComponent(destination)}&travelmode=driving`;
+    )}&destination=${encodeURIComponent(
+      destination
+    )}&travelmode=driving&dir_action=navigate`;
 
-    // For android devices we can try the google.navigation intent for a better app experience
-    const androidUrl = `google.navigation:q=${destLat},${destLng}`;
+    setSelectedCustomer(customer);
+    setMapsUrl(googleMapsUrl);
+    setMapsVisible(true);
+  };
+
+  // Open Google Maps in in-app browser
+  const openInAppBrowser = async (url: string) => {
+    try {
+      await WebBrowser.openBrowserAsync(url, {
+        toolbarColor: "#007AFF",
+        controlsColor: "#FFFFFF",
+        secondaryToolbarColor: "#0056b3",
+        enableBarCollapsing: true,
+        showTitle: true,
+        dismissButtonStyle: "close",
+      });
+    } catch (error) {
+      console.error("Error opening browser:", error);
+      Alert.alert("Error", "Could not open maps. Please try again.");
+    }
+  };
+
+  // Alternative: Open in external app (user's choice)
+  const openInExternalApp = async (customer: Customer) => {
+    if (!customer.latitude || !customer.longitude) {
+      Alert.alert(
+        "Invalid Location",
+        "This customer doesn't have valid location coordinates."
+      );
+      return;
+    }
+
+    const destination = `${customer.latitude},${customer.longitude}`;
+
+    // Try different map apps
+    const urls = {
+      googleMaps: `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
+        destination
+      )}&travelmode=driving`,
+      waze: `https://waze.com/ul?ll=${customer.latitude},${customer.longitude}&navigate=yes`,
+      appleMaps: `http://maps.apple.com/?daddr=${customer.latitude},${customer.longitude}&dirflg=d`,
+    };
 
     try {
-      if (Platform.OS === "android") {
-        const supported = await Linking.canOpenURL(androidUrl);
-        if (supported) {
-          await Linking.openURL(androidUrl);
-          return;
-        }
-      }
-
-      // Fallback to web/google maps url
-      const supportedWeb = await Linking.canOpenURL(googleMapsUrl);
-      if (supportedWeb) {
-        await Linking.openURL(googleMapsUrl);
+      // Try Google Maps first
+      const supported = await Linking.canOpenURL(urls.googleMaps);
+      if (supported) {
+        await Linking.openURL(urls.googleMaps);
         return;
       }
 
-      Alert.alert(
-        "Can't open maps",
-        "No suitable app found to open directions."
-      );
-    } catch (err) {
-      console.warn("Error opening maps", err);
-      Alert.alert("Error", "Could not open maps. Please try again.");
+      // Fallback to other apps
+      Alert.alert("Open in Maps", "Choose a maps app:", [
+        {
+          text: "Google Maps",
+          onPress: () => Linking.openURL(urls.googleMaps),
+        },
+        {
+          text: "Waze",
+          onPress: () => Linking.openURL(urls.waze),
+        },
+        {
+          text: "Apple Maps",
+          onPress: () => Linking.openURL(urls.appleMaps),
+        },
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+      ]);
+    } catch (error) {
+      console.error("Error opening external app:", error);
+      Alert.alert("Error", "Could not open maps app. Please try again.");
     }
+  };
+
+  const handleSuccessOk = () => {
+    setSuccessVisible(false);
   };
 
   const getNearestCustomerInfo = ():
@@ -233,7 +310,12 @@ export default function HomeScreen() {
     let nearest: (Customer & { distance: number }) | null = null;
     let minDistance = Infinity;
 
-    customerLocations.forEach((customer) => {
+    customers.forEach((customer) => {
+      // Skip customers without coordinates or already delivered
+      if (!customer.latitude || !customer.longitude) return;
+      if (customer.status && customer.status.toLowerCase() === "delivered")
+        return;
+
       const distance = calculateDistance(
         currentLocation.latitude,
         currentLocation.longitude,
@@ -252,39 +334,72 @@ export default function HomeScreen() {
 
   const nearestCustomer = getNearestCustomerInfo();
 
+  // Pending-orders list removed (nearest-customer card handles status changes)
+
+  const handleMarkDelivered = async (id: string) => {
+    try {
+      await updateCustomerStatus(id, "delivered");
+      // refresh lists
+      await loadCustomers();
+      Alert.alert("Success", "Order marked as delivered");
+    } catch (err: any) {
+      console.error("Failed to update status", err);
+      Alert.alert("Error", err?.message || "Failed to update status");
+    }
+  };
+
   const [searchQuery, setSearchQuery] = useState("");
 
   // Prepare filtered and sorted customers by distance (closest first)
-  const filteredCustomers = customerLocations.filter((c) => {
+  // Only show customers that are NOT delivered (case-insensitive), then apply search
+  const filteredCustomers = customers.filter((c) => {
+    if ((c.status || "").toLowerCase() === "delivered") return false;
     const q = searchQuery.trim().toLowerCase();
     if (!q) return true;
     return (
-      c.name.toLowerCase().includes(q) || c.address.toLowerCase().includes(q)
+      c.name.toLowerCase().includes(q) ||
+      c.address.toLowerCase().includes(q) ||
+      (c.deliveryPerson && c.deliveryPerson.toLowerCase().includes(q)) ||
+      (c.orderDetails && c.orderDetails.toLowerCase().includes(q))
     );
   });
 
   const customersWithDistance = filteredCustomers.map((c) => {
-    const distance = currentLocation
-      ? calculateDistance(
-          currentLocation.latitude,
-          currentLocation.longitude,
-          c.latitude,
-          c.longitude
-        )
-      : null;
+    let distance = null;
+    if (currentLocation && c.latitude && c.longitude) {
+      distance = calculateDistance(
+        currentLocation.latitude,
+        currentLocation.longitude,
+        c.latitude,
+        c.longitude
+      );
+    }
     return { ...c, distance };
   });
 
   const sortedCustomers = customersWithDistance.sort((a, b) => {
+    // Customers with coordinates first, then by distance
     if (a.distance == null && b.distance == null) return 0;
     if (a.distance == null) return 1;
     if (b.distance == null) return -1;
     return a.distance - b.distance;
   });
 
+  // Function to generate consistent avatar based on customer ID
+  const getCustomerAvatar = (customer: Customer) => {
+    const seed = customer._id || customer.name;
+    return `https://picsum.photos/seed/${seed}/80/80`;
+  };
+
   return (
     <View style={styles.container}>
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        style={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
         <ImageBackground
           source={{
             uri: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=1400&auto=format&fit=crop&ixlib=rb-4.0.3&s=3d0b7d7d2f1b4c0e3f0b7c8f6d5a9a12",
@@ -346,7 +461,7 @@ export default function HomeScreen() {
             </View>
           )}
 
-          {loading && (
+          {locationLoading && (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color="#007AFF" />
               <Text style={styles.loadingText}>Getting location...</Text>
@@ -354,132 +469,357 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* Nearest Customer Card */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Nearest Customer</Text>
-          {nearestCustomer ? (
-            <TouchableOpacity
-              activeOpacity={0.85}
-              onPress={() =>
-                openDirections(
-                  nearestCustomer.latitude,
-                  nearestCustomer.longitude,
-                  nearestCustomer.name
-                )
-              }
-              style={styles.customerCard}
-            >
-              <Text style={styles.customerName}>{nearestCustomer.name}</Text>
-              <Text style={styles.customerAddress}>
-                {nearestCustomer.address}
-              </Text>
-              <Text
-                style={[
-                  styles.distanceText,
-                  {
-                    color:
-                      nearestCustomer.distance <= 100 ? "#4CAF50" : "#FF9800",
-                  },
-                ]}
-              >
-                📏 {nearestCustomer.distance}m away
-              </Text>
-              {nearestCustomer.distance <= 100 && (
-                <Text style={styles.nearbyText}>🎉 You're nearby!</Text>
-              )}
-            </TouchableOpacity>
-          ) : (
-            <Text style={styles.noDataText}>Calculating distance...</Text>
-          )}
-        </View>
-
-        {/* All Customers Card */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>
-            All Customers ({customerLocations.length})
-          </Text>
-
-          <View style={styles.searchContainer}>
-            <Ionicons
-              name="search"
-              size={16}
-              color="#999"
-              style={{ marginRight: 8 }}
-            />
-            <TextInput
-              placeholder="Search by name or address"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              style={styles.searchInput}
-              returnKeyType="search"
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity
-                onPress={() => setSearchQuery("")}
-                style={{ paddingLeft: 8 }}
-              >
-                <Ionicons name="close-circle" size={18} color="#999" />
-              </TouchableOpacity>
-            )}
+        {/* Data Loading Status */}
+        {loading && (
+          <View style={styles.card}>
+            <View style={styles.loadingRow}>
+              <ActivityIndicator size="small" color="#007AFF" />
+              <Text style={styles.loadingText}>Loading customers...</Text>
+            </View>
           </View>
+        )}
 
-          {sortedCustomers.map((customer, index) => {
-            const distance = customer.distance;
+        {error && !loading && (
+          <View style={styles.card}>
+            <Text style={styles.errorText}>Error: {error}</Text>
+            <TouchableOpacity
+              style={styles.retryButton}
+              onPress={loadCustomers}
+            >
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
-            return (
-              <TouchableOpacity
-                key={customer.id}
-                activeOpacity={0.8}
-                onPress={() =>
-                  openDirections(
-                    customer.latitude,
-                    customer.longitude,
-                    customer.name
-                  )
-                }
-                style={[
-                  styles.customerItem,
-                  index < sortedCustomers.length - 1 &&
-                    styles.customerItemBorder,
-                ]}
-              >
-                <Image
-                  source={{
-                    uri: `https://picsum.photos/seed/${customer.id}/80/80`,
-                  }}
-                  style={styles.customerThumb}
-                />
-                <View style={{ flex: 1 }}>
-                  <View style={styles.customerHeader}>
-                    <Text style={styles.customerItemName}>{customer.name}</Text>
-                    {distance != null && (
-                      <Text
-                        style={[
-                          styles.customerDistance,
-                          { color: distance <= 100 ? "#4CAF50" : "#666" },
-                        ]}
-                      >
-                        {distance}m
+        {/* Nearest Customer Card - Only show if we have customers with coordinates */}
+        {!loading &&
+          !error &&
+          customers.some(
+            (c) =>
+              c.latitude &&
+              c.longitude &&
+              (!c.status || c.status.toLowerCase() !== "delivered")
+          ) && (
+            <>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Nearest Customer</Text>
+                {nearestCustomer ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => openDirectionsInApp(nearestCustomer)}
+                    style={styles.customerCard}
+                  >
+                    <Text style={styles.customerName}>
+                      {nearestCustomer.name}
+                    </Text>
+                    <Text style={styles.customerAddress}>
+                      {nearestCustomer.address}
+                    </Text>
+                    {nearestCustomer.orderDetails && (
+                      <Text style={styles.orderDetails}>
+                        📦 {nearestCustomer.orderDetails}
                       </Text>
                     )}
-                  </View>
-                  <Text style={styles.customerItemAddress}>
-                    {customer.address}
-                  </Text>
-                  {distance != null && distance <= 100 && (
-                    <Text style={styles.withinRangeText}>Within range! 🎯</Text>
-                  )}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+                    {nearestCustomer.deliveryPerson && (
+                      <Text style={styles.deliveryPerson}>
+                        🚶 {nearestCustomer.deliveryPerson}
+                      </Text>
+                    )}
+                    <Text
+                      style={[
+                        styles.distanceText,
+                        {
+                          color:
+                            nearestCustomer.distance <= 100
+                              ? "#4CAF50"
+                              : "#FF9800",
+                        },
+                      ]}
+                    >
+                      📏 {nearestCustomer.distance}m away
+                    </Text>
+                    {nearestCustomer.distance <= 100 && (
+                      <Text style={styles.nearbyText}>🎉 You're nearby!</Text>
+                    )}
+                    <View style={styles.directionsButtonRow}>
+                      <View style={styles.directionsButtonInline}>
+                        <Ionicons name="navigate" size={16} color="#007AFF" />
+                        <Text style={styles.directionsButtonText}>
+                          Open Directions
+                        </Text>
+                      </View>
 
-        {/* Instructions moved to Help screen (access from header menu) */}
+                      <View style={{ flex: 1 }} />
+
+                      <View style={{ alignItems: "flex-end" }}>
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            fontWeight: "700",
+                            color:
+                              (nearestCustomer.status || "").toLowerCase() ===
+                              "delivered"
+                                ? "#4CAF50"
+                                : (
+                                    nearestCustomer.status || ""
+                                  ).toLowerCase() === "cancelled"
+                                ? "#f44336"
+                                : "#FF9800",
+                            marginBottom: 6,
+                          }}
+                        >
+                          {(nearestCustomer.status || "").toUpperCase()}
+                        </Text>
+
+                        {(nearestCustomer.status || "").toLowerCase() !==
+                          "delivered" && (
+                          <TouchableOpacity
+                            style={[
+                              styles.smallButton,
+                              { backgroundColor: "#4CAF50" },
+                            ]}
+                            onPress={() =>
+                              handleMarkDelivered(nearestCustomer._id)
+                            }
+                          >
+                            <Text style={{ color: "#fff", fontWeight: "700" }}>
+                              Mark Delivered
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={styles.noDataText}>Calculating distance...</Text>
+                )}
+              </View>
+
+              {/* Recent Pending Orders removed per request */}
+            </>
+          )}
+
+        {/* All Customers Card */}
+        {!loading && !error && (
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Text style={styles.cardTitle}>
+                All Customers ({sortedCustomers.length})
+              </Text>
+              <TouchableOpacity
+                onPress={onRefresh}
+                style={styles.refreshButton}
+              >
+                <Ionicons name="refresh" size={18} color="#007AFF" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.searchContainer}>
+              <Ionicons
+                name="search"
+                size={16}
+                color="#999"
+                style={{ marginRight: 8 }}
+              />
+              <TextInput
+                placeholder="Search by name, address, or delivery person"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                style={styles.searchInput}
+                returnKeyType="search"
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity
+                  onPress={() => setSearchQuery("")}
+                  style={{ paddingLeft: 8 }}
+                >
+                  <Ionicons name="close-circle" size={18} color="#999" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {sortedCustomers.length === 0 ? (
+              <Text style={styles.noDataText}>
+                {searchQuery
+                  ? "No customers found matching your search"
+                  : "No customers available"}
+              </Text>
+            ) : (
+              sortedCustomers.map((customer, index) => {
+                const distance = customer.distance;
+                const hasCoordinates = customer.latitude && customer.longitude;
+
+                return (
+                  <TouchableOpacity
+                    key={customer._id}
+                    activeOpacity={0.8}
+                    onPress={() => openDirectionsInApp(customer)}
+                    style={[
+                      styles.customerItem,
+                      index < sortedCustomers.length - 1 &&
+                        styles.customerItemBorder,
+                      !hasCoordinates && styles.customerItemDisabled,
+                    ]}
+                  >
+                    <Image
+                      source={{ uri: getCustomerAvatar(customer) }}
+                      style={styles.customerThumb}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.customerHeader}>
+                        <Text style={styles.customerItemName}>
+                          {customer.name}
+                        </Text>
+                        {distance != null && (
+                          <Text
+                            style={[
+                              styles.customerDistance,
+                              { color: distance <= 100 ? "#4CAF50" : "#666" },
+                            ]}
+                          >
+                            {distance}m
+                          </Text>
+                        )}
+                        {!hasCoordinates && (
+                          <Text style={styles.noLocationText}>No GPS</Text>
+                        )}
+                      </View>
+                      <Text style={styles.customerItemAddress}>
+                        {customer.address}
+                      </Text>
+                      {customer.orderDetails && (
+                        <Text style={styles.customerOrderDetails}>
+                          {customer.orderDetails}
+                        </Text>
+                      )}
+                      {customer.deliveryPerson && (
+                        <Text style={styles.customerDeliveryPerson}>
+                          Delivery: {customer.deliveryPerson}
+                        </Text>
+                      )}
+                      <View style={styles.customerStatusRow}>
+                        <Text
+                          style={[
+                            styles.customerStatus,
+                            {
+                              color:
+                                (customer.status || "").toLowerCase() ===
+                                "delivered"
+                                  ? "#4CAF50"
+                                  : (customer.status || "").toLowerCase() ===
+                                    "cancelled"
+                                  ? "#f44336"
+                                  : "#FF9800",
+                            },
+                          ]}
+                        >
+                          {customer.status.toUpperCase()}
+                        </Text>
+                        {distance != null && distance <= 100 && (
+                          <Text style={styles.withinRangeText}>
+                            Within range! 🎯
+                          </Text>
+                        )}
+                      </View>
+                      {hasCoordinates && (
+                        <View style={styles.directionsButtonSmall}>
+                          <Ionicons name="navigate" size={14} color="#007AFF" />
+                          <Text style={styles.directionsButtonTextSmall}>
+                            Get Directions
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })
+            )}
+          </View>
+        )}
       </ScrollView>
 
       {/* Location Popup Provider */}
       <LocationPopupProvider />
+
+      {/* Success modal (flash) */}
+      <Modal visible={successVisible} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>Success</Text>
+            <Text style={styles.modalMessage}>{successText}</Text>
+            <TouchableOpacity
+              style={styles.modalButton}
+              onPress={handleSuccessOk}
+            >
+              <Text style={{ color: "#fff", fontWeight: "700" }}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Maps Modal for In-App Directions */}
+      <Modal
+        visible={mapsVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+      >
+        <View style={styles.mapsModalContainer}>
+          <View style={styles.mapsModalHeader}>
+            <Text style={styles.mapsModalTitle}>
+              Directions to {selectedCustomer?.name}
+            </Text>
+            <TouchableOpacity
+              onPress={() => setMapsVisible(false)}
+              style={styles.closeButton}
+            >
+              <Ionicons name="close" size={24} color="#333" />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.mapsModalContent}>
+            <Text style={styles.mapsDescription}>
+              Opening Google Maps with directions to:
+            </Text>
+            <Text style={styles.customerInfo}>{selectedCustomer?.name}</Text>
+            <Text style={styles.modalCustomerAddress}>
+              {selectedCustomer?.address}
+            </Text>
+
+            <View style={styles.mapsButtonsContainer}>
+              <TouchableOpacity
+                style={[styles.mapsButton, styles.primaryButton]}
+                onPress={() => {
+                  setMapsVisible(false);
+                  openInAppBrowser(mapsUrl);
+                }}
+              >
+                <Ionicons name="compass" size={20} color="#fff" />
+                <Text style={styles.primaryButtonText}>Open in App</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.mapsButton, styles.secondaryButton]}
+                onPress={() => {
+                  setMapsVisible(false);
+                  if (selectedCustomer) {
+                    openInExternalApp(selectedCustomer);
+                  }
+                }}
+              >
+                <Ionicons name="navigate" size={20} color="#007AFF" />
+                <Text style={styles.secondaryButtonText}>External App</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => setMapsVisible(false)}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -528,11 +868,19 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
+  cardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 15,
+  },
   cardTitle: {
     fontSize: 18,
     fontWeight: "bold",
     color: "#333",
-    marginBottom: 15,
+  },
+  refreshButton: {
+    padding: 5,
   },
   statusRow: {
     flexDirection: "row",
@@ -565,6 +913,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#007AFF",
   },
+  errorText: {
+    fontSize: 14,
+    color: "#f44336",
+    textAlign: "center",
+    marginBottom: 10,
+  },
+  retryButton: {
+    backgroundColor: "#007AFF",
+    padding: 10,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  retryButtonText: {
+    color: "white",
+    fontWeight: "600",
+  },
   customerCard: {
     backgroundColor: "#f8f9fa",
     padding: 15,
@@ -583,6 +947,17 @@ const styles = StyleSheet.create({
     color: "#666",
     marginBottom: 8,
   },
+  orderDetails: {
+    fontSize: 12,
+    color: "#666",
+    marginBottom: 4,
+    fontStyle: "italic",
+  },
+  deliveryPerson: {
+    fontSize: 12,
+    color: "#666",
+    marginBottom: 8,
+  },
   distanceText: {
     fontSize: 14,
     fontWeight: "600",
@@ -593,6 +968,33 @@ const styles = StyleSheet.create({
     color: "#4CAF50",
     fontWeight: "600",
     fontStyle: "italic",
+  },
+  directionsButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 10,
+    padding: 8,
+    backgroundColor: "#e3f2fd",
+    borderRadius: 8,
+    alignSelf: "flex-start",
+  },
+  directionsButtonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 10,
+  },
+  directionsButtonInline: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 8,
+    backgroundColor: "#e3f2fd",
+    borderRadius: 8,
+  },
+  directionsButtonText: {
+    color: "#007AFF",
+    fontWeight: "600",
+    marginLeft: 6,
+    fontSize: 12,
   },
   noDataText: {
     fontSize: 14,
@@ -610,6 +1012,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#f0f0f0",
   },
+  customerItemDisabled: {
+    opacity: 0.6,
+  },
   customerHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -625,22 +1030,56 @@ const styles = StyleSheet.create({
   customerDistance: {
     fontSize: 13,
     fontWeight: "600",
+    marginLeft: 8,
+  },
+  noLocationText: {
+    fontSize: 10,
+    color: "#999",
+    fontStyle: "italic",
+    marginLeft: 8,
   },
   customerItemAddress: {
     fontSize: 12,
     color: "#666",
+    marginBottom: 2,
   },
-  withinRangeText: {
+  customerOrderDetails: {
     fontSize: 11,
-    color: "#4CAF50",
-    fontWeight: "600",
+    color: "#888",
+    fontStyle: "italic",
+    marginBottom: 2,
+  },
+  customerDeliveryPerson: {
+    fontSize: 11,
+    color: "#666",
+    marginBottom: 2,
+  },
+  customerStatusRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     marginTop: 4,
   },
-  instructionText: {
-    fontSize: 13,
-    color: "#666",
-    marginBottom: 8,
-    lineHeight: 18,
+  customerStatus: {
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  withinRangeText: {
+    fontSize: 10,
+    color: "#4CAF50",
+    fontWeight: "600",
+  },
+  directionsButtonSmall: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 6,
+    alignSelf: "flex-start",
+  },
+  directionsButtonTextSmall: {
+    color: "#007AFF",
+    fontWeight: "600",
+    marginLeft: 4,
+    fontSize: 11,
   },
   titleRow: {
     flexDirection: "row",
@@ -673,11 +1112,135 @@ const styles = StyleSheet.create({
     opacity: 0.95,
     height: 150,
   },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalBox: {
+    width: "85%",
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 20,
+    alignItems: "center",
+    elevation: 6,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 8,
+    color: "#333",
+  },
+  modalMessage: {
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
+    marginBottom: 18,
+  },
+  modalButton: {
+    backgroundColor: "#007AFF",
+    paddingVertical: 12,
+    paddingHorizontal: 22,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  smallButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   customerThumb: {
     width: 48,
     height: 48,
     borderRadius: 8,
     marginRight: 12,
     backgroundColor: "#eee",
+  },
+  // Maps Modal Styles
+  mapsModalContainer: {
+    flex: 1,
+    backgroundColor: "#fff",
+  },
+  mapsModalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: 20,
+    paddingTop: 60,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
+  },
+  mapsModalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    flex: 1,
+  },
+  closeButton: {
+    padding: 4,
+  },
+  mapsModalContent: {
+    flex: 1,
+    padding: 20,
+    paddingTop: 40,
+  },
+  mapsDescription: {
+    fontSize: 16,
+    color: "#666",
+    textAlign: "center",
+    marginBottom: 20,
+  },
+  customerInfo: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  modalCustomerAddress: {
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
+    marginBottom: 40,
+  },
+  mapsButtonsContainer: {
+    marginBottom: 20,
+  },
+  mapsButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    borderRadius: 12,
+  },
+  primaryButton: {
+    backgroundColor: "#007AFF",
+  },
+  secondaryButton: {
+    backgroundColor: "#f8f9fa",
+    borderWidth: 2,
+    borderColor: "#007AFF",
+  },
+  primaryButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  secondaryButtonText: {
+    color: "#007AFF",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  cancelButton: {
+    padding: 16,
+    alignItems: "center",
+  },
+  cancelButtonText: {
+    color: "#666",
+    fontSize: 16,
+    fontWeight: "500",
   },
 });
